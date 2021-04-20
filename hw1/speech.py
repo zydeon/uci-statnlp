@@ -1,192 +1,287 @@
 #!/bin/python
 
-class Data:
-  pass
+import json
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline, FeatureUnion
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import normalize
+from sklearn.base import BaseEstimator
+import pandas as pd
+import nltk
+import time
+import os
+import sys
+import numpy as np
+from data_io import *
 
 
-def read_files(tarfname):
-  """Read the training and development data from the speech tar file.
-  The returned object contains various fields that store the data, such as:
+def load_word2vecs(windows=(5, 10, 15, 20), dimensions=([100, 150, 200])):
+  word2vecs = {}
+  for window in windows:
+    for dim in dimensions:
+      print(f"Loading w2v window={window} dimension={dim}...", end='')
+      with open(f'data/word2vecs/labeled+unlabeled_{window}_{dim}.txt', "r") as f:
+        word2vecs[f'w{window}_d{dim}'] = {}
+        for line in f.readlines():
+          linesplit = line.split()
+          word2vecs[f'w{window}_d{dim}'][linesplit[0]] = np.array([float(x) for x in linesplit[1:]])
+      print("done")
+  return word2vecs
 
-  train_data,dev_data: array of documents (array of words)
-  train_fnames,dev_fnames: list of filenames of the doccuments (same length as data)
-  train_labels,dev_labels: the true string label for each document (same length as data)
-
-  The data is also preprocessed for use with scikit-learn, as:
-
-  count_vec: CountVectorizer used to process the data (for reapplication on new data)
-  trainX,devX: array of vectors representing Bags of Words, i.e. documents processed through the vectorizer
-  le: LabelEncoder, i.e. a mapper from string labels to ints (stored for reapplication)
-  target_labels: List of labels (same order as used in le)
-  trainy,devy: array of int labels, one for each document
-  """
-  import tarfile
-  tar = tarfile.open(tarfname, "r:gz")
-  speech = Data()
-
-  print("-- train data")
-  speech.train_data, speech.train_fnames, speech.train_labels = read_tsv(tar, "train.tsv")
-  print(len(speech.train_data))
-
-  print("-- dev data")
-  speech.dev_data, speech.dev_fnames, speech.dev_labels = read_tsv(tar, "dev.tsv")
-  print(len(speech.dev_data))
-
-  print("-- transforming data and labels")
-  from sklearn.feature_extraction.text import CountVectorizer
-  speech.count_vect = CountVectorizer()
-  speech.trainX = speech.count_vect.fit_transform(speech.train_data)
-  speech.devX = speech.count_vect.transform(speech.dev_data)
-
-  from sklearn import preprocessing
-  speech.le = preprocessing.LabelEncoder()
-  speech.le.fit(speech.train_labels)
-  speech.target_labels = speech.le.classes_
-  speech.trainy = speech.le.transform(speech.train_labels)
-  speech.devy = speech.le.transform(speech.dev_labels)
-
-  tar.close()
-  return speech
+# if __name__ == '__main__':
+WORD2VECS = load_word2vecs()
 
 
-def read_unlabeled(tarfname, speech):
-  """Reads the unlabeled data.
+class W2VAggVectorizer(BaseEstimator):
 
-  The returned object contains three fields that represent the unlabeled data.
+  def __init__(self, kind=None, agg=None):  # window=None, dim=None):
+    self.kind = kind
+    self.agg = agg
 
-  data: documents, represented as sequence of words
-  fnames: list of filenames, one for each document
-  X: bag of word vector for each document, using the speech.vectorizer
-  """
-  import tarfile
-  tar = tarfile.open(tarfname, "r:gz")
-  unlabeled = Data()
-  unlabeled.data = []
-  unlabeled.fnames = []
-  for m in tar.getmembers():
-    if "unlabeled" in m.name and ".txt" in m.name:
-      unlabeled.fnames.append(m.name)
-      unlabeled.data.append(read_instance(tar, m.name))
-  unlabeled.X = speech.count_vect.transform(unlabeled.data)
-  print(unlabeled.X.shape)
-  tar.close()
-  return unlabeled
+  def set_params(self, **params):
+    self.agg = self._agg_vectorizer_factory(params['kind'])
+    super().set_params(**params)
 
+  def _agg_vectorizer_factory(self, kind):
+    if kind == 'avgw2v_tfidf':
+      return W2VAggVectorizerAvgTfidf()
+    elif kind == 'avgw2v':
+      return W2VAggVectorizerAvg()
+    elif kind == 'sumw2v':
+      return W2VAggVectorizerSum()
+    elif kind == 'minw2v':
+      return W2VAggVectorizerMin()
+    elif kind == 'maxw2v':
+      return W2VAggVectorizerMax()
+    elif kind == 'minmaxw2v':
+      return W2VAggVectorizerMinMax()
 
-def read_tsv(tar, fname):
-  member = tar.getmember(fname)
-  print(member.name)
-  tf = tar.extractfile(member)
-  data = []
-  labels = []
-  fnames = []
-  for line in tf:
-    line = line.decode("utf-8")
-    (ifname, label) = line.strip().split("\t")
-    # print ifname, ":", label
-    content = read_instance(tar, ifname)
-    labels.append(label)
-    fnames.append(ifname)
-    data.append(content)
-  return data, fnames, labels
+  def fit(self, X, y=None):
+    return self.agg.fit(X, y)
+
+  def transform(self, X):
+    return self.agg.transform(X)
 
 
-def write_pred_kaggle_file(unlabeled, cls, outfname, speech):
-  """Writes the predictions in Kaggle format.
+class W2VAggVectorizerAvgTfidf(BaseEstimator):
+  def __init__(self, tfidf=TfidfVectorizer(tokenizer=nltk.word_tokenize), window=None, dim=None):
+    self.tfidf = tfidf
+    self.dim = dim
+    self.window = window
 
-  Given the unlabeled object, classifier, outputfilename, and the speech object,
-  this function write the predictions of the classifier on the unlabeled data and
-  writes it to the outputfilename. The speech object is required to ensure
-  consistent label names.
-  """
-  yp = cls.predict(unlabeled.X)
-  labels = speech.le.inverse_transform(yp)
-  f = open(outfname, 'w')
-  f.write("FileIndex,Category\n")
-  for i in range(len(unlabeled.fnames)):
-    # fname = unlabeled.fnames[i]
-    # iid = file_to_id(fname)
-    f.write(str(i + 1))
-    f.write(",")
-    # f.write(fname)
-    # f.write(",")
-    f.write(labels[i])
-    f.write("\n")
-  f.close()
+  def fit(self, X, y=None):
+    self.tfidf.fit(X, y)
+    vocabulary_items = sorted(self.tfidf.vocabulary_.items(), key=lambda pair: pair[1])  # Sort by index
+    vocabulary = [w for w, ix in vocabulary_items]
+    self.w2v = np.array([WORD2VECS[f'w{self.window}_d{self.dim}'].get(w, np.zeros(self.dim)) for w in vocabulary])
+    return self
 
+  def transform(self, X):
+    # Compute TF-IDF matrix.
+    tfidf_values = self.tfidf.transform(X).toarray()
+    tfidf_values = normalize(tfidf_values, norm='l1')  # Rows sum to 1 for taking average.
 
-def file_to_id(fname):
-  return str(int(fname.replace("unlabeled/", "").replace("labeled/", "").replace(".txt", "")))
+    # Compute weighted average of word2vec vectors, using tf-idf weights
+    return np.dot(tfidf_values, self.w2v)
+
+  def fit_transform(self, X, y=None):
+    self.fit(X, y)
+    return self.transform(X)
 
 
-def write_gold_kaggle_file(tsvfile, outfname):
-  """Writes the output Kaggle file of the truth.
+class W2VAggVectorizerAvg(BaseEstimator):
+  def __init__(self, bow=CountVectorizer(tokenizer=nltk.word_tokenize), window=None, dim=None):
+    self.bow = bow
+    self.dim = dim
+    self.window = window
 
-  You will not be able to run this code, since the tsvfile is not
-  accessible to you (it is the test labels).
-  """
-  f = open(outfname, 'w')
-  f.write("FileIndex,Category\n")
-  i = 0
-  with open(tsvfile, 'r') as tf:
-    for line in tf:
-      (ifname, label) = line.strip().split("\t")
-      # iid = file_to_id(ifname)
-      i += 1
-      f.write(str(i))
-      f.write(",")
-      # f.write(ifname)
-      # f.write(",")
-      f.write(label)
-      f.write("\n")
-  f.close()
+  def fit(self, X, y=None):
+    self.bow.fit(X, y)
+    vocabulary_items = sorted(self.bow.vocabulary_.items(), key=lambda pair: pair[1])  # Sort by index
+    vocabulary = [w for w, ix in vocabulary_items]
+    self.w2v = np.array([WORD2VECS[f'w{self.window}_d{self.dim}'].get(w, np.zeros(self.dim)) for w in vocabulary])
+    return self
 
+  def transform(self, X):
+    # Compute bow matrix.
+    bow_values = self.bow.transform(X).toarray()
+    bow_values = normalize(bow_values, norm='l1')  # Rows sum to 1 for taking average.
 
-def write_basic_kaggle_file(tsvfile, outfname):
-  """Writes the output Kaggle file of the naive baseline.
-
-  This baseline predicts OBAMA_PRIMARY2008 for all the instances.
-  You will not be able to run this code, since the tsvfile is not
-  accessible to you (it is the test labels).
-  """
-  f = open(outfname, 'w')
-  f.write("FileIndex,Category\n")
-  i = 0
-  with open(tsvfile, 'r') as tf:
-    for line in tf:
-      (ifname, label) = line.strip().split("\t")
-      i += 1
-      f.write(str(i))
-      f.write(",")
-      f.write("OBAMA_PRIMARY2008")
-      f.write("\n")
-  f.close()
+    # Compute weighted average of word2vec vectors
+    return np.dot(bow_values, self.w2v)
 
 
-def read_instance(tar, ifname):
-  inst = tar.getmember(ifname)
-  ifile = tar.extractfile(inst)
-  content = ifile.read().strip()
-  return content
+class W2VAggVectorizerSum(BaseEstimator):
+  def __init__(self, bow=CountVectorizer(tokenizer=nltk.word_tokenize), window=None, dim=None):
+    self.bow = bow
+    self.dim = dim
+    self.window = window
+
+  def fit(self, X, y=None):
+    self.bow.fit(X, y)
+    vocabulary_items = sorted(self.bow.vocabulary_.items(), key=lambda pair: pair[1])  # Sort by index
+    vocabulary = [w for w, ix in vocabulary_items]
+    self.w2v = np.array([WORD2VECS[f'w{self.window}_d{self.dim}'].get(w, np.zeros(self.dim)) for w in vocabulary])
+    return self
+
+  def transform(self, X):
+    # Compute bow matrix.
+    bow_values = self.bow.transform(X).toarray()
+
+    # Compute weighted average of word2vec vectors
+    return np.dot(bow_values, self.w2v)
+
+
+class W2VAggVectorizerMin(BaseEstimator):
+  def __init__(self, bow=CountVectorizer(tokenizer=nltk.word_tokenize, binary=True), window=None, dim=None):
+    self.bow = bow
+    self.dim = dim
+    self.window = window
+
+  def fit(self, X, y=None):
+    return self
+
+  def transform(self, X):
+    return np.array([
+        np.min([
+            WORD2VECS[f'w{self.window}_d{self.dim}'].get(w, np.zeros(self.dim))
+            for w in nltk.word_tokenize(doc)
+        ], axis=0)
+        for doc in X
+    ])
+
+
+class W2VAggVectorizerMax(BaseEstimator):
+  def __init__(self, bow=CountVectorizer(tokenizer=nltk.word_tokenize, binary=True), window=None, dim=None):
+    self.bow = bow
+    self.dim = dim
+    self.window = window
+
+  def fit(self, X, y=None):
+    return self
+
+  def transform(self, X):
+    return np.array([
+        np.max([
+            WORD2VECS[f'w{self.window}_d{self.dim}'].get(w, np.zeros(self.dim))
+            for w in nltk.word_tokenize(doc)
+        ], axis=0)
+        for doc in X
+    ])
+
+
+class W2VAggVectorizerMinMax(BaseEstimator):
+  def __init__(self, bow=CountVectorizer(tokenizer=nltk.word_tokenize, binary=True), window=None, dim=None):
+    self.bow = bow
+    self.dim = dim
+    self.window = window
+
+  def fit(self, X, y=None):
+    return self
+
+  def transform(self, X):
+    return np.concatenate(
+        (
+            np.array([
+                np.min([
+                    WORD2VECS[f'w{self.window}_d{self.dim}'].get(w, np.zeros(self.dim))
+                    for w in nltk.word_tokenize(doc)
+                ], axis=0)
+                for doc in X
+            ]),
+            np.array([
+                np.max([
+                    WORD2VECS[f'w{self.window}_d{self.dim}'].get(w, np.zeros(self.dim))
+                    for w in nltk.word_tokenize(doc)
+                ], axis=0)
+                for doc in X
+            ])
+        ), axis=1
+    )
+
+
+def get_features_transformer(features_type):
+  if features_type == 'bow':
+    return CountVectorizer()
+  elif features_type == 'tfidf':
+    return TfidfVectorizer(tokenizer=nltk.word_tokenize)
+  elif features_type == 'tfidf_stopwords':
+    return TfidfVectorizer(tokenizer=nltk.word_tokenize,
+                           stop_words=nltk.corpus.stopwords.words("english"))
+  elif features_type == 'bow+tfidf':
+    return FeatureUnion([
+        ('a', TfidfVectorizer()),
+        ('b', CountVectorizer())
+    ])
+  elif features_type == 'w2vagg':
+    return TfidfEmbeddingVectorizer()
+  elif features_type == 'tfidf+w2vagg':
+    return FeatureUnion([
+        ('tfidf', TfidfVectorizer(tokenizer=nltk.word_tokenize)),
+        ('w2vagg', W2VAggVectorizer())
+    ])
+  else:
+    raise Exception("Type of features not handled")
+
+
+def summary_results(df_results):
+  main_cols = ['params', 'mean_train_score', 'mean_test_score', 'std_train_score', 'std_test_score']
+  return df_results[main_cols]
 
 
 if __name__ == "__main__":
+  # Get param grid configs.
+  param_grid = json.load(sys.stdin)
+
+  # Load data.
   print("Reading data")
-  tarfname = "data/speech.tar.gz"
-  speech = read_files(tarfname)
-  print("Training classifier")
-  import classify
-  cls = classify.train_classifier(speech.trainX, speech.trainy)
-  print("Evaluating")
-  classify.evaluate(speech.trainX, speech.trainy, cls)
-  classify.evaluate(speech.devX, speech.devy, cls)
+  labeled = load_data()
 
-  print("Reading unlabeled data")
-  unlabeled = read_unlabeled(tarfname, speech)
-  print("Writing pred file")
-  write_pred_kaggle_file(unlabeled, cls, "data/speech-pred.csv", speech)
+  # Get features_type
+  features_type = param_grid.pop('features_type')
 
-  # You can't run this since you do not have the true labels
-  # print "Writing gold file"
-  # write_gold_kaggle_file("data/speech-unlabeled.tsv", "data/speech-gold.csv")
-  # write_basic_kaggle_file("data/speech-unlabeled.tsv", "data/speech-basic.csv")
+  # Create output folder.
+  print("Creating results folder")
+  ts = time.strftime('%Y-%m-%d_%Hh%Mm%S', time.localtime())
+  out_folder = f'data/results/{ts}_{features_type}'
+  os.mkdir(out_folder)
+
+  # Save hyperparams ranges.
+  print(f"Saving param_grid to {out_folder}/param_grid.json")
+  with open(f'{out_folder}/param_grid.json', 'w') as f:
+    json.dump(param_grid, f, indent=2)
+
+  # Perform grid search.
+  print("Doing grid search on params")
+  t0 = time.time()
+  pipe = Pipeline([
+      (f'{features_type}', get_features_transformer(features_type)),
+      ('lr', LogisticRegression())
+  ])
+
+  gs = GridSearchCV(pipe, param_grid=param_grid, n_jobs=-1, verbose=4, return_train_score=True)
+  gs.fit(labeled.data, labeled.y)
+  print("[Grid search] Done in %0.3fs\n" % (time.time() - t0))
+
+  # Save results
+  print(f"Saving results to {out_folder}...", end='')
+  df_results = pd.DataFrame(gs.cv_results_)
+  df_results.to_csv(f'{out_folder}/results_verbose.csv')
+  summary_results(df_results).to_csv(f'{out_folder}/results.csv')
+  print(' Done')
+
+  # Save best
+  print(gs.best_score_)
+  print(gs.best_params_)
+  with open(f'{out_folder}/best_params.json', 'w') as f:
+    json.dump({'mean_test_score': gs.best_score_, **gs.best_params_}, f)
+
+  # Predict unlabeled with best parameters setting.
+  print("Predicting unlabeled data with best params...")
+  yp = gs.predict(np.array(load_unlabeled_data().data))
+  write_pred_kaggle_file(yp, f'{out_folder}/sup.csv', labeled.le)
+  print("[done]")
+
+  # Save best weights
+  # print(gs.best_estimator_['lr'].coef_)
