@@ -1,0 +1,14 @@
+%!TEX root=report.tex
+\begin{tabular}{c||c|r|l||c|r|l}
+  \multirow{2}{*}{\textbf{Domain}} & \multicolumn{3}{c||}{\textbf{unigram > bigram}} & \multicolumn{3}{c}{\textbf{unigram < bigram}} \\\cline{2-7}
+  & \textbf{Model} & \textbf{PPL} & \textbf{Sentence} & \textbf{Model} & \textbf{PPL} & \textbf{Sentence}\\\hhline{=||=|=|=||=|=|=}
+  %
+  \multirow{2}{*}{Brown} & unigram & 287 & \multirow{2}{*}{That one they would} & unigram & 2727 & \multirow{2}{*}{The quick brown fox jumps.} \\
+                         & bigram  & 1371 &                                     & bigram  & 439 & \\\hline
+  %
+  \multirow{2}{*}{Gutenberg} & unigram & 412 & \multirow{2}{*}{Israel 15 and 16 from him.} & unigram & 372 & \multirow{2}{*}{The people of Israel did it.} \\
+                         & bigram  & 10781 &                                     & bigram  & 54 & \\\hline
+  %
+  \multirow{2}{*}{Reuters} & unigram & 429 & \multirow{2}{*}{It has shares of him of 000.} & unigram & 1616 & \multirow{2}{*}{His financial analyst is rich.} \\
+                         & bigram  & 1421 &                                     & bigram  & 222 & \\
+\end{tabular}

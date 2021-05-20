@@ -1,0 +1,12 @@
+%!TEX root=report.tex
+\begin{tabular}{c|r|l||c|r|l}
+  \multicolumn{3}{c||}{\textbf{Brown > Reuters}} & \multicolumn{3}{c}{\textbf{Brown < Reuters}} \\\hline
+  \textbf{Domain} & \textbf{PPL} & \textbf{Sentence} & \textbf{Model} & \textbf{PPL} & \textbf{Sentence}\\\hhline{=|=|=||=|=|=}
+  %
+  Brown     & 260 & \multirow{2}{*}{This love for God.} & Brown      & 405 & \multirow{2}{*}{The company code is 000.} \\
+  Reuters   & 3278 &                                    & Reuters    & 41 & \\\hhline{=|=|=||=|=|=}
+  %
+  \multicolumn{3}{c||}{\textbf{Brown > Gutenberg}} & \multicolumn{3}{c}{\textbf{Brown < Gutenberg}} \\\hline
+  Brown     & 45 & \multirow{2}{*}{American of the year.} & Brown      & 898 & \multirow{2}{*}{God though shall not.} \\
+  Gutenberg & 141 &                    & Gutenberg  & 237 & \\\hline
+\end{tabular}
